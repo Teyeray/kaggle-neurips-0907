@@ -1,5 +1,6 @@
 # model.py
 # WD-MPNN encoder + multi-task head + official wMAE loss + checkpoint utils
+# with Dropout & optional Label Noise
 # PyTorch Geometric >= 2.3
 
 from typing import Dict, List, Optional, Tuple, Union
@@ -51,7 +52,7 @@ class WDMPNNEncoder(MessagePassing):
     Edge-centered message passing + node update + graph pooling.
     """
 
-    def __init__(self,
+        def __init__(self,
                  node_feat_dim: int,
                  edge_feat_dim: int,
                  hidden_dim: int,
@@ -83,26 +84,26 @@ class WDMPNNEncoder(MessagePassing):
         if edge_weight is None:
             edge_weight = torch.ones(edge_attr.size(0), device=x.device, dtype=x.dtype)
 
-        # 1) init edge hidden
-        h = torch.cat([x[src], edge_attr], dim=-1)   # [E, F_n+F_e]
+        # init edge hidden
+        h = torch.cat([x[src], edge_attr], dim=-1)
         h = F.relu(self.W_i(h))
         h = self.edge_ln(h)
 
-        # 2) edge updates
+        # edge updates
         for _ in range(self.num_edge_layers):
             m = torch.zeros_like(h)
             m = m.index_add(0, dst, edge_weight.unsqueeze(-1) * self.W_h(h))
             h = F.relu(h + m)
             h = self.edge_ln(h)
 
-        # 3) node update
+        # node update
         agg = torch.zeros(x.size(0), self.hidden_dim, device=x.device, dtype=x.dtype)
         agg = agg.index_add(0, dst, edge_weight.unsqueeze(-1) * h)
         node_input = torch.cat([x, agg], dim=-1)
         node_hidden = F.relu(self.W_o(node_input))
         node_hidden = self.node_ln(node_hidden)
 
-        # 4) pooling
+        # pooling
         if self.pool == "mean":
             graph_repr = global_mean_pool(node_hidden, batch)
         else:
@@ -150,9 +151,7 @@ class MultiTaskHead(nn.Module):
 # ---------- Full Model ----------
 
 class WDMPNNModel(nn.Module):
-    """
-    Full WD-MPNN: encoder + head, with official wMAE loss + checkpoint utils
-    """
+    """Full WD-MPNN with official wMAE loss + Dropout + Label Noise."""
 
     def __init__(self,
                  node_feat_dim: int,
@@ -163,14 +162,19 @@ class WDMPNNModel(nn.Module):
                  output_dim: int = 1,
                  pool: str = "mean",
                  num_edge_layers: int = 3,
-                 dropout: float = 0.1):
+                 dropout: float = 0.1,
+                 use_label_noise: bool = False,
+                 label_noise_scale: float = 0.01):
         super().__init__()
         self.tasks = tasks if tasks is not None else []
         self.encoder = WDMPNNEncoder(node_feat_dim, edge_feat_dim,
                                      hidden_dim, num_edge_layers, pool)
         self.head = MultiTaskHead(hidden_dim, mlp_hidden, tasks,
                                   output_dim=output_dim, dropout=dropout)
+
         self._w: Dict[str, float] = {t: 1.0 for t in self.tasks}
+        self.use_label_noise = use_label_noise
+        self.label_noise_scale = label_noise_scale
 
     def forward(self, data) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
         edge_weight = getattr(data, "edge_weight", None)
@@ -189,15 +193,10 @@ class WDMPNNModel(nn.Module):
 
     # ----- loss -----
     def compute_wmae_loss(self,
-                          outputs: Union[torch.Tensor, Dict[str, torch.Tensor]],
-                          targets: Union[torch.Tensor, Dict[str, torch.Tensor]],
+                          outputs: Dict[str, torch.Tensor],
+                          targets: Dict[str, torch.Tensor],
                           mask: Optional[Dict[str, torch.Tensor]] = None
                           ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        if not self.tasks:
-            abs_err = (outputs - targets).abs()
-            loss = abs_err.mean()
-            return loss, {"task": loss.item()}
-
         some_task = self.tasks[0]
         B = outputs[some_task].shape[0]
         total = outputs[some_task].new_tensor(0.0)
@@ -206,6 +205,12 @@ class WDMPNNModel(nn.Module):
 
         for t in self.tasks:
             yhat, y = outputs[t], targets[t]
+
+            # label noise injection
+            if self.use_label_noise:
+                noise = self.label_noise_scale * y.std() * torch.randn_like(y)
+                y = y + noise
+
             if mask is not None:
                 m = mask[t].bool()
                 if m.sum() == 0:
@@ -244,7 +249,9 @@ class WDMPNNModel(nn.Module):
     def get_config(self):
         return {
             "tasks": self.tasks,
-            "weights": self._w
+            "weights": self._w,
+            "use_label_noise": self.use_label_noise,
+            "label_noise_scale": self.label_noise_scale
         }
 
 __all__ = [
