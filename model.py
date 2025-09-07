@@ -52,12 +52,12 @@ class WDMPNNEncoder(MessagePassing):
     Edge-centered message passing + node update + graph pooling.
     """
 
-        def __init__(self,
-                 node_feat_dim: int,
-                 edge_feat_dim: int,
-                 hidden_dim: int,
-                 num_edge_layers: int = 3,
-                 pool: str = "mean"):
+    def __init__(self,
+                node_feat_dim: int,
+                edge_feat_dim: int,
+                hidden_dim: int,
+                num_edge_layers: int = 3,
+                pool: str = "mean"):
         super().__init__(aggr='add')
         assert pool in {"mean", "add"}
         self.hidden_dim = hidden_dim
