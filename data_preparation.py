@@ -1,7 +1,6 @@
 # data_preparation.py
-# 支持 Kaggle Polymer Dataset + QM9 Dataset
-# 输出格式兼容 WD-MPNN model.py
-# PyTorch Geometric >= 2.3
+# Notebook-friendly: no __main__, all functions callable
+# Supports Kaggle Polymer Dataset + QM9 Dataset
 
 import os
 import numpy as np
@@ -18,7 +17,7 @@ from torch_geometric.datasets import QM9
 # -----------------------------
 
 def graph_augment(data, node_drop_prob=0.0, edge_drop_prob=0.0, noise_std=0.0):
-    """简单的图增强：随机节点mask、边dropout、全局特征扰动"""
+    """随机节点mask、边dropout、全局特征扰动"""
     if node_drop_prob > 0 and data.x is not None:
         mask = torch.rand(data.x.size(0)) > node_drop_prob
         data.x = data.x.clone()
@@ -107,7 +106,7 @@ class PolymerDataset(InMemoryDataset):
             smi = row["SMILES"]
             try:
                 x, ei, ea = create_graph_from_smiles(smi)
-            except Exception as e:
+            except Exception:
                 continue
             y_vals, mask_vals = [], []
             for t in TARGETS:
@@ -154,20 +153,3 @@ def load_qm9_dataset(root="data/QM9", batch_size=64, transform=None):
     dataset = QM9(root=root, transform=transform)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     return loader, dataset
-
-# -----------------------------
-# main 测试
-# -----------------------------
-
-if __name__ == "__main__":
-    # Kaggle Polymer
-    print("📂 Load Polymer Dataset")
-    poly_loader, poly_dataset = load_polymer_dataset("train.csv", batch_size=4, transform=graph_augment)
-    batch = next(iter(poly_loader))
-    print(f"Polymer batch: x={batch.x.shape}, edge_index={batch.edge_index.shape}, y={batch.y.shape}, mask={batch.mask.shape}")
-
-    # QM9
-    print("\n📂 Load QM9 Dataset")
-    qm9_loader, qm9_dataset = load_qm9_dataset(root="data/QM9", batch_size=4, transform=graph_augment)
-    batch = next(iter(qm9_loader))
-    print(f"QM9 batch: x={batch.x.shape}, edge_index={batch.edge_index.shape}, y={batch.y.shape}")
