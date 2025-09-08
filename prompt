@@ -1,0 +1,151 @@
+给你一份“能直接喂给大模型”的工程化规范（prompt）。它把我们刚讨论的两轮式 OOF 生成 + 跨目标 OOF 特征 + 可选迭代筛选讲清楚，要求大模型产出完整、可运行的 Kaggle Notebook 代码（含日志、可重复、无泄漏）。
+
+任务目标
+
+为 NeurIPS Open Polymer Prediction 任务，构建一个无二层的多目标学习管线：
+
+第1轮：对每个目标，用基础特征做 KFold 训练，生成训练集 OOF与测试集 PRED。
+
+第2轮：训练目标 A 时，只使用其它目标的 OOF 作为特征（不自栈）。
+
+可选迭代坐标上升：若加入某些 OOF 特征对某目标的 OOF RMSE 稳定提升，则保留并进入下一轮；否则丢弃。
+
+全流程严格防泄漏、输出可复现工件。
+
+数据与列
+
+输入：train.csv, test.csv, 及外部补充数据（SMILES,Tg/FFV/Tc/Density/Rg 等）。
+
+目标集合：TARGETS = ["Tg","FFV","Tc","Density","Rg"]（存在缺失）。
+
+基础字符串特征：对 SMILES 计算字符级扩展特征（长度、大小写/数字/符号计数、元素计数、占位符 */[R...] 统计、比例特征等），不依赖 RDKit。
+
+绝不对目标列做任何填充；仅对数值特征做中位数填充（fit on train）。
+
+无泄漏要求（必须遵守）
+
+固定分折：KFold(n_splits=5, shuffle=True, random_state=42)；若实现方便，支持 GroupKFold（group=规范化 SMILES），保证同一 SMILES 不跨折。
+
+严格 OOF：第 i 行的 OOF 预测来自于未见过该行标签的模型。
+
+折内预处理：一切 fit（填充/标准化/特征选择等）都在训练折上 fit，再 transform 验证折。
+
+不自栈：训练 A 时不使用 OOF_A。只用 OOF_(others)。推理时用对应的 PRED_(others)。
+
+测试不参与任何 fit。
+
+产物命名与保存
+
+基表（无任何 OOF/PRED 列）：/kaggle/working/exp_poly/base/train_base.parquet, test_base.parquet，feature_cols.json，以及 imputer.pkl。
+
+第1轮生成：
+
+训练集列：meta_{target}_r1（OOF；对无该目标标签的行，用折均预测填补，避免缺失）
+
+测试集列：pred_{target}_r1（逐折预测的均值）
+
+同时保存到 /kaggle/working/exp_poly/round1/oof_{target}.parquet 与 pred_{target}.parquet。
+
+若进行第2轮或更多轮，后缀改为 _r2, _r3。
+
+最终提交：submission.csv。
+
+评估与选择
+
+统一用 OOF RMSE（mean_squared_error(..., squared=False)）评估每个目标。
+
+迭代筛选（可选）：
+
+对目标 A，从候选集合 {meta_B, meta_C, ...} 做贪心前向：逐个加入，若 OOF RMSE 下降 ≥ δ（如 0.3）且 ≥3/5 折同时改善，则保留；否则丢弃。
+
+最多 2 轮；若整体增益 < δ 则早停。
+
+为降低偶然性，可支持 RepeatedKFold 或多种子重复，取均值作决策。
+
+记录基线（仅基础特征）与“加入 OOF 后”的对比日志。
+
+需要实现的函数（务必拆成干净函数，含 docstring 与类型）
+
+get_data_paths() -> dict[ str, Path ]：返回所有数据路径。
+
+load_and_merge_data(paths) -> (pd.DataFrame train, pd.DataFrame test, pd.DataFrame sub)：读取官方与外部数据，外部数据仅追加行，不在此去重/聚合，保留来源标记 source（如 tc_data, tg_jcim 等）。
+
+deduplicate_train(train) -> pd.DataFrame：后置去重（按 SMILES 聚合，对 TARGETS 取中位数；非目标列取 first）。保留一份“未去重扩展版”快照用于审计。
+
+compute_smiles_features_extended(smiles: str) -> dict：无 RDKit 的字符级+占位符特征（我们讨论过的扩展版）。
+
+add_smiles_features(df, col="SMILES") -> pd.DataFrame：批量生成并拼接特征列。
+
+build_feature_matrix(train, test, exclude_cols=['id','SMILES']+TARGETS) -> (train_fe, test_fe, feature_cols)：
+
+仅对数值特征列做中位数填充（fit on train，transform on both）。
+
+返回填充后的副本与 feature_cols 列表。
+
+make_lgb(**kwargs) -> lgb.LGBMRegressor：返回一套稳健的回归参数（n_estimators 3000–5000, lr≈0.03, num_leaves≈63, subsample/colsample 0.8, early_stopping 100 等）。
+
+oof_and_pred_for_target(train_fe, test_fe, feature_cols, target, folds, group_col=None) -> (np.ndarray meta_train, np.ndarray meta_test, float rmse)：
+
+若该目标无标签，返回全 NaN。
+
+产生严格 OOF、折均训练全体预测（用于无标签行补全）、与测试 PRED。
+
+返回该目标的 OOF RMSE。
+
+generate_all_oof(train_fe, test_fe, feature_cols, targets, folds) -> (train_with_meta, test_with_meta, scores: dict)：
+
+对每个 t in targets 调 oof_and_pred_for_target；
+
+在训练集创建 meta_{t}_rX 列，在测试集创建 pred_{t}_rX 列；
+
+返回拼好列的数据帧与每目标 OOF RMSE 字典。
+
+evaluate_target_with_optional_oof(train_fe, test_fe, base_feats, target, candidate_oof_cols: list[str], delta=0.3, folds=..., model_factory=make_lgb) -> (best_feats, score_base, score_best)：
+
+先用 base_feats 做 OOF RMSE；
+
+贪心试加 candidate_oof_cols，满足阈值与多数折一致性则保留。
+
+train_final_and_predict(train_fe, test_fe, feats, target, model_factory) -> (oof, pred, score)：可用于最终复评或产出新的 _r2。
+
+save_base(...), save_round_artifacts(...)：把基表、特征列、imputer、每轮 oof/pred、scores 等保存到约定目录。
+
+训练/推理（主流程要求）
+
+Round 0：构建基表（读数→拼接→去重→加 SMILES 特征→数值填充→得到 feature_cols），保存到 base/。
+
+Round 1：用 feature_cols 对 TARGETS 逐个产出 meta_{t}_r1（train）与 pred_{t}_r1（test），并打印每目标的 OOF RMSE，保存到 round1/。
+
+训练目标 A：构造 feats_A = feature_cols + [meta_{u}_r1 for u in TARGETS if u != A and 列存在]；做一遍 OOF 评估；**（可选）**执行贪心筛选仅保留有效 OOF 列；最终全量训练并在 test 用 pred_{u}_r1 推理。
+
+若启用迭代：将筛选后的特征集合作为 A 的“新基础”，重算 OOF_A_r2（其余目标亦然），并再次比较分数；若提升有限则停止。
+
+输出最终 submission.csv，日志打印：每目标的 base vs +OOF 的 OOF RMSE、被保留的 OOF 列清单。
+
+代码风格与健壮性
+
+统一随机种子 42；打印清晰日志（样本数、缺失统计、每折 RMSE、均值±方差）。
+
+对异常/无数据情况（某目标完全缺失）要优雅退化为全 NaN 列并跳过。
+
+任何时刻不改变目标列原始缺失；不对目标列做填充。
+
+单元检查：
+
+使用某目标训练时，特征中不包含 meta_{same_target}_*；
+
+训练/测试特征列一致；
+
+训练时无 NaN；
+
+OOF 与原标签对齐形状一致。
+
+可配置项
+
+折数 n_splits、是否 GroupKFold（group_col="canon_smiles"，若未实现规范化可先用原 SMILES）。
+
+模型工厂 make_lgb 超参；阈值 delta；是否启用迭代与最大轮数。
+
+选择是否保存每折模型或仅保存 OOF/PRED。
+
+产出预期：一份可直接运行的 Kaggle Notebook / .py，按上述规范把两轮式 OOF与跨目标 OOF 特征跑通，可选迭代筛选，严格无泄漏，并在 /kaggle/working/exp_poly/ 下写入所有工件与 submission.csv。

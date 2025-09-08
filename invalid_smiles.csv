@@ -1,0 +1,7 @@
+SMILES,invalid_reason
+*C(F)(F)CC(F)([R])C(*)(F)F,contains_asterisk
+*CN([R'])Cc2cc([R]c1cc(*)c(O)c(CN([R'])C*)c1)cc(*)c2O,contains_asterisk
+*NC(=O)c4ccc3c(=O)n(c2ccc([R]c1ccc(*)cc1)cc2)c(=O)c3c4,contains_asterisk
+*OC2OC(CO[R])C(OC1OC(CO[R])C(*)C(O[R])C1O[R])C(O[R])C2O[R],contains_asterisk
+*O[Si](*)([R])[R],contains_asterisk
+O=C=N[R1]N=C=O.O[R2]O.O[R3]O,contains_R_placeholder
