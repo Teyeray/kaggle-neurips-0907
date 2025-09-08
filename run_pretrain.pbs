@@ -1,0 +1,47 @@
+#!/bin/bash
+
+#PBS -N kaggle_pipeline_gpu
+
+#PBS -P personal-e1350261
+
+#PBS -l select=1:ncpus=36:mem=250gb:ngpus=1
+
+#PBS -l walltime=12:00:00
+
+#PBS -j oe
+
+#PBS -o logs/pbs_default.log
+
+
+
+set -euo pipefail
+
+cd $PBS_O_WORKDIR
+
+
+
+# 激活你的虚拟环境
+
+source /scratch/e1350261/venvs/ai39/bin/activate
+
+
+
+# 检查 Python 路径
+
+which python
+
+python --version
+
+
+
+# 跑个小测试
+
+python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+
+
+
+# 真正运行你的脚本
+
+python pipeline.py --output "/home/svu/e1350261/kaggle/kaggle-neurips-0907" \
+
+    2>&1 | tee logs/out_${PBS_JOBID}.log
