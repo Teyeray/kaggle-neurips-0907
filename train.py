@@ -26,12 +26,7 @@ def train_one_epoch(model, loader, optimizer, device, tasks, use_mask=True, epoc
         optimizer.zero_grad()
         outputs = model(batch)
 
-        if hasattr(batch, "mask") and use_mask:
-            mask = {t: batch.mask[:, i] for i, t in enumerate(tasks)}
-            targets = {t: batch.y[:, i] for i, t in enumerate(tasks)}
-        else:
-            mask = None
-            targets = {t: batch.y[:, i] for i, t in enumerate(tasks)}
+        targets, mask = _targets_masks_from_batch(batch, tasks, use_mask=use_mask)
 
         loss, mae_dict = model.compute_wmae_loss(outputs, targets, mask=mask)
         loss.backward()
@@ -65,12 +60,7 @@ def evaluate(model, loader, device, tasks, use_mask=True, epoch=None, epochs=Non
             batch = batch.to(device)
             outputs = model(batch)
 
-            if hasattr(batch, "mask") and use_mask:
-                mask = {t: batch.mask[:, i] for i, t in enumerate(tasks)}
-                targets = {t: batch.y[:, i] for i, t in enumerate(tasks)}
-            else:
-                mask = None
-                targets = {t: batch.y[:, i] for i, t in enumerate(tasks)}
+            targets, mask = _targets_masks_from_batch(batch, tasks, use_mask=use_mask)
 
             loss, mae_dict = model.compute_wmae_loss(outputs, targets, mask=mask)
             total_loss += loss.item()
@@ -238,3 +228,38 @@ def load_best_model(path: str, dataset, hidden_dim=128,
     model.eval()
     print(f"✅ Loaded best model from {path}")
     return model
+
+def _targets_masks_from_batch(batch, tasks, use_mask=True):
+    """
+    将 PyG collate 后的一维 y/mask 还原为 [B, T]，再拆成 {task: Tensor[B]}。
+    兼容本来就是 [B, T] 的情况。
+    """
+    T = len(tasks)
+
+    # y: [B*T] or [B, T]
+    y = batch.y
+    if y.dim() == 1:
+        assert y.numel() % T == 0, f"y length {y.numel()} not divisible by T={T}"
+        B = y.numel() // T
+        y = y.view(B, T)
+    elif y.dim() == 2:
+        B = y.size(0)
+        assert y.size(1) == T, f"y second dim {y.size(1)} != T={T}"
+    else:
+        raise ValueError(f"Unexpected y shape: {tuple(y.shape)}")
+
+    # mask: [B*T] or [B, T] or 不存在
+    m_dict = None
+    if use_mask and hasattr(batch, "mask"):
+        m = batch.mask
+        if m.dim() == 1:
+            assert m.numel() == B*T, f"mask length {m.numel()} != B*T={B*T}"
+            m = m.view(B, T)
+        elif m.dim() == 2:
+            assert m.size(0) == B and m.size(1) == T, f"mask shape {tuple(m.shape)} != ({B},{T})"
+        else:
+            raise ValueError(f"Unexpected mask shape: {tuple(m.shape)}")
+        m_dict = {t: m[:, i] for i, t in enumerate(tasks)}
+
+    targets = {t: y[:, i] for i, t in enumerate(tasks)}
+    return targets, m_dict
